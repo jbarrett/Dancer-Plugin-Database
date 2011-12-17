@@ -4,6 +4,7 @@ use strict;
 use Carp;
 use DBI;
 use base qw(DBI::db);
+use feature "switch";
 
 our $VERSION = '0.07';
 
@@ -135,10 +136,18 @@ sub quick_lookup {
     return ( $row && exists $row->{$data} ) ? $row->{$data} : undef;
 }
 
+sub quick_create {
+    my ($self, $table_name, %def) = @_;
+
+    
+    
+    return _quick_query('CREATE', $table_name, \%def);
+}
+
 sub _quick_query {
     my ($self, $type, $table_name, $data, $where) = @_;
     
-    if ($type !~ m{^ (SELECT|INSERT|UPDATE|DELETE) $}x) {
+    if ($type !~ m{^ (SELECT|INSERT|UPDATE|DELETE|CREATE) $}x) {
         carp "Unrecognised query type $type!";
         return;
     }
@@ -150,6 +159,11 @@ sub _quick_query {
         && (!$data || ref $data ne 'HASH')) 
     {
         carp "Expected a hashref of changes";
+        return;
+    if (($type eq 'CREATE')
+        && (!$data || ref $data ne 'HASH')) 
+    {
+        carp "Expected a hashref of the table definition";
         return;
     }
     if (($type =~ m{^ (SELECT|UPDATE|DELETE) $}x)
@@ -177,6 +191,7 @@ sub _quick_query {
         INSERT => "INSERT INTO $table_name ",
         UPDATE => "UPDATE $table_name SET ",
         DELETE => "DELETE FROM $table_name ",
+        # CREATE => "CREATE $table_name "
     }->{$type};
     if ($type eq 'INSERT') {
         $sql .= "("
@@ -230,6 +245,28 @@ sub _quick_query {
         else {
             carp "Can't handle ref " . ref $where . " for where";
             return;
+        }
+    }
+
+    if ($type eq 'CREATE') {
+        given ($self->{Driver}{Name}) {
+            when (undef) {
+                carp "Unable to retrieve DBI driver name for create";
+                return;
+            }
+            when ('SQLite') {
+                $sql = _get_sqlite_ddl($table_name, $data);
+            }
+            when ('mysql') {
+                $sql = _get_mysql_ddl($table_name, $data);
+            }
+            when ('Pg') {
+                $sql = _get_pg_ddl($table_name, $data);
+            }
+            default {
+                carp "Sorry, create for your database is not currently supported";
+                return;
+            }
         }
     }
 
@@ -303,6 +340,99 @@ sub _get_where_sql {
     # Return the appropriate SQL, and indicate that the value should be added to
     # the bind params
     return (($not ? ' NOT' . $st{$op} : $st{$op}), 1);
+}
+
+sub _get_type {
+    # A reasonable set of backend-agnostic types ..?
+
+    my ($type) = @_;
+    given (type) {
+        when ('int') {
+            return " BIGINT ";
+        {
+        when ('time') {
+            return " TIMESTAMP ";
+        }
+        when ('bool') {
+            return " BOOLEAN ";
+        }
+        when ('float') {
+            return " DOUBLE PRECISION ";
+        }
+        default {
+            return " TEXT ";
+        }
+    }
+}
+
+sub _get_pg_ddl {
+    my ($self, $table_name, $def) = @_;
+    my $sql;
+    my @cols;
+
+    # The 'if not exist' parameter for CREATE is supported from v9.1 - 
+    #   is it worth querying the version string to see if we have it?
+    # This procedure should be portable across versions...
+
+    $sql = <<'END';
+CREATE FUNCTION create_table () RETURNS void
+AS $_$
+BEGIN
+
+IF NOT EXISTS ( SELECT 1 
+                FROM   pg_catalog.pg_tables 
+                WHERE tablename = ?
+        ) THEN
+
+END
+
+    $sql .= "CREATE TABLE $table_name (";
+    
+    @cols = map { 
+        $_ .= (($def->{$_}{increment})? " SERIAL " :
+                (defined $def->{$_}{type})? _get_type($def->{$_}{type}) : " TEXT ") .
+                 (($def->{$_}{key})? " PRIMARY KEY " : "")
+    } keys %$def;
+
+    $sql .= join(',', @cols);
+
+    $sql .= <<'END';
+);
+
+END IF;
+
+END;
+$_$
+  LANGUAGE plpgsql;
+
+SELECT create_table();
+END
+
+    return $sql;
+)
+
+END IF;
+
+END;
+$_$
+  LANGUAGE plpgsql;
+
+SELECT create_mytable();
+END
+
+    return $sql;
+}
+
+sub _get_mysql_ddl {
+    my ($self, $table_name, $def) = @_;
+    my $sql;
+    
+}
+
+sub _get_sqlite_ddl {
+    my ($self, $table_name, $def) = @_;
+    my $sql;
+    
 }
 
 =back
